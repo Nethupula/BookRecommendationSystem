@@ -19,6 +19,7 @@ models/*.joblib
 
 # Dataset files
 data/*.csv
+data/processed/
 
 # Environment variables
 .env
