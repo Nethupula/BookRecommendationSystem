@@ -23,3 +23,6 @@ data/processed/
 
 # Environment variables
 .env
+# Neural network model and training outputs
+models/*.keras
+models/*.png

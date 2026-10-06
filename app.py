@@ -1,9 +1,10 @@
-import streamlit as st
-import pandas as pd
-import joblib
 import re
-from scipy.sparse import csr_matrix
-from sklearn.neighbors import NearestNeighbors
+import difflib
+import numpy as np
+import pandas as pd
+import streamlit as st
+import joblib
+import tensorflow as tf
 
 
 # ============================================================
@@ -14,7 +15,7 @@ st.set_page_config(
     page_title="AI Book Recommendation System",
     page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
@@ -25,7 +26,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-
     .stApp {
         background-color: #0e1117;
     }
@@ -112,10 +112,9 @@ st.markdown(
     section[data-testid="stSidebar"] {
         background-color: #171a21;
     }
-
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
@@ -124,167 +123,109 @@ st.markdown(
 # ============================================================
 
 @st.cache_data
-def load_data():
 
+def load_data():
     books = pd.read_csv(
         "data/processed/books_clean.csv",
-        encoding="latin-1"
+        encoding="latin-1",
     )
 
     ratings = pd.read_csv(
         "data/processed/ratings_clean.csv",
-        encoding="latin-1"
+        encoding="latin-1",
     )
 
     books["ISBN"] = books["ISBN"].astype(str)
     ratings["ISBN"] = ratings["ISBN"].astype(str)
+    ratings["User-ID"] = pd.to_numeric(
+        ratings["User-ID"], errors="coerce"
+    ).astype("Int64")
+    ratings["Book-Rating"] = pd.to_numeric(
+        ratings["Book-Rating"], errors="coerce"
+    )
 
     return books, ratings
 
 
 @st.cache_resource
+
 def load_content_model():
+    vectorizer = joblib.load("models/tfidf_vectorizer.joblib")
+    content_model = joblib.load("models/content_model.joblib")
+    tfidf_matrix = joblib.load("models/tfidf_matrix.joblib")
+    return vectorizer, content_model, tfidf_matrix
 
-    vectorizer = joblib.load(
-        "models/tfidf_vectorizer.joblib"
+
+@st.cache_resource
+
+def load_neural_network():
+    model = tf.keras.models.load_model(
+        "models/neural_recommender.keras",
+        safe_mode=False,
     )
 
-    content_model = joblib.load(
-        "models/content_model.joblib"
-    )
+    raw_user_to_index = joblib.load("models/user_to_index.joblib")
+    raw_book_to_index = joblib.load("models/book_to_index.joblib")
 
-    tfidf_matrix = joblib.load(
-        "models/tfidf_matrix.joblib"
-    )
+    # Normalize mapping keys so the app works whether the mappings were
+    # saved with integer or string IDs.
+    user_to_index = {}
+    for key, value in raw_user_to_index.items():
+        try:
+            user_to_index[int(key)] = int(value)
+        except (ValueError, TypeError):
+            continue
 
-    return (
-        vectorizer,
-        content_model,
-        tfidf_matrix
-    )
+    book_to_index = {}
+    for key, value in raw_book_to_index.items():
+        book_to_index[str(key)] = int(value)
+
+    return model, user_to_index, book_to_index
 
 
 books, ratings = load_data()
 
-(
-    vectorizer,
-    content_model,
-    tfidf_matrix
-) = load_content_model()
+vectorizer, content_model, tfidf_matrix = load_content_model()
+neural_model, neural_user_to_index, neural_book_to_index = load_neural_network()
 
 
 # ============================================================
-# TITLE NORMALIZATION
+# HELPER FUNCTIONS
 # ============================================================
 
 def normalize_title(title):
-    """
-    Normalize book titles so different editions,
-    formats and series labels can be recognized
-    as the same underlying book.
-    """
-
+    """Normalize titles so different editions are easier to detect."""
     title = str(title).strip().lower()
 
-    # Remove text inside parentheses
+    title = re.sub(r"\([^)]*\)", "", title)
+    title = re.sub(r"\[[^\]]*\]", "", title)
+
     title = re.sub(
-        r"\([^)]*\)",
+        r"\b(paperback|hardcover|hardback|large print|mass market|"
+        r"audio|audiobook|edition|book club|special edition|deluxe edition)\b",
         "",
-        title
+        title,
     )
 
-    # Remove text inside square brackets
-    title = re.sub(
-        r"\[[^\]]*\]",
-        "",
-        title
-    )
-
-    # Remove common edition / format terms
-    title = re.sub(
-        r"\b("
-        r"paperback|"
-        r"hardcover|"
-        r"hardback|"
-        r"large print|"
-        r"mass market|"
-        r"audio|"
-        r"audiobook|"
-        r"edition|"
-        r"book club|"
-        r"special edition|"
-        r"deluxe edition"
-        r")\b",
-        "",
-        title
-    )
-
-    # Remove punctuation
-    title = re.sub(
-        r"[^a-z0-9\s]",
-        "",
-        title
-    )
-
-    # Remove extra spaces
-    title = " ".join(
-        title.split()
-    )
-
-    return title
+    title = re.sub(r"[^a-z0-9\s]", "", title)
+    return " ".join(title.split())
 
 
-# ============================================================
-# FILTER UNWANTED / SUPPLEMENTARY MATERIAL
-# ============================================================
-
-def is_non_book_material(
-    title,
-    author="",
-    publisher=""
-):
-    """
-    Detect study guides, notes, summaries,
-    workbooks and other supplementary material.
-
-    These materials are excluded from recommendations
-    because the goal is to recommend actual books.
-    """
-
-    title_text = str(title).lower()
-    author_text = str(author).lower()
-    publisher_text = str(publisher).lower()
-
+def is_non_book_material(title, author="", publisher=""):
+    """Filter study guides and other supplementary material."""
     text = (
-        title_text
-        + " "
-        + author_text
-        + " "
-        + publisher_text
+        f"{str(title).lower()} "
+        f"{str(author).lower()} "
+        f"{str(publisher).lower()}"
     )
 
     unwanted_keywords = [
-
-        # ----------------------------------------------------
-        # Cliffs / Spark notes
-        # ----------------------------------------------------
-
         "cliffs notes",
         "cliffsnotes",
         "sparknotes",
-
-        # ----------------------------------------------------
-        # York Notes
-        # ----------------------------------------------------
-
         "york notes",
         "pearson york notes",
         "yorknotes",
-
-        # ----------------------------------------------------
-        # Study guides
-        # ----------------------------------------------------
-
         "study guide",
         "study guides",
         "student guide",
@@ -293,20 +234,10 @@ def is_non_book_material(
         "teacher guides",
         "teacher's guide",
         "teachers guide",
-
-        # ----------------------------------------------------
-        # Summaries
-        # ----------------------------------------------------
-
         "summary",
         "summaries",
         "book summary",
         "literary summary",
-
-        # ----------------------------------------------------
-        # Reading / analysis guides
-        # ----------------------------------------------------
-
         "analysis guide",
         "analysis guides",
         "reading guide",
@@ -317,11 +248,6 @@ def is_non_book_material(
         "exam guides",
         "revision notes",
         "study notes",
-
-        # ----------------------------------------------------
-        # Workbooks / educational material
-        # ----------------------------------------------------
-
         "workbook",
         "work book",
         "answer key",
@@ -330,22 +256,12 @@ def is_non_book_material(
         "test banks",
         "lesson plan",
         "lesson plans",
-
-        # ----------------------------------------------------
-        # Literary study material
-        # ----------------------------------------------------
-
         "literary criticism",
         "literary analysis",
         "companion guide",
         "study edition",
         "notes edition",
         "critical edition",
-
-        # ----------------------------------------------------
-        # Teacher / student editions
-        # ----------------------------------------------------
-
         "teacher edition",
         "teacher editions",
         "student edition",
@@ -354,138 +270,22 @@ def is_non_book_material(
         "student's edition",
         "teachers edition",
         "students edition",
-
-        # ----------------------------------------------------
-        # Companions
-        # ----------------------------------------------------
-
         "student companion",
         "student companions",
         "teacher companion",
-        "teacher companions"
+        "teacher companions",
     ]
 
-    # Check all keywords
-    for keyword in unwanted_keywords:
-
-        if keyword in text:
-            return True
-
-    # Explicit York Notes check
-    if "york notes" in title_text:
-        return True
-
-    if "york notes" in publisher_text:
-        return True
-
-    return False
+    return any(keyword in text for keyword in unwanted_keywords)
 
 
 # ============================================================
-# PREPARE COLLABORATIVE MODEL
+# CONTENT-BASED MODEL - USED FOR NEW USERS / COLD START
 # ============================================================
 
-@st.cache_resource
-def prepare_collaborative_model(ratings):
-
-    filtered = ratings.copy()
-
-    # --------------------------------------------------------
-    # Active users
-    # --------------------------------------------------------
-
-    user_counts = filtered[
-        "User-ID"
-    ].value_counts()
-
-    active_users = user_counts[
-        user_counts >= 5
-    ].index
-
-    filtered = filtered[
-        filtered["User-ID"].isin(
-            active_users
-        )
-    ]
-
-    # --------------------------------------------------------
-    # Frequently rated books
-    # --------------------------------------------------------
-
-    book_counts = filtered[
-        "ISBN"
-    ].value_counts()
-
-    active_books = book_counts[
-        book_counts >= 5
-    ].index
-
-    filtered = filtered[
-        filtered["ISBN"].isin(
-            active_books
-        )
-    ]
-
-    # --------------------------------------------------------
-    # User-book matrix
-    # --------------------------------------------------------
-
-    user_book_matrix = filtered.pivot_table(
-        index="User-ID",
-        columns="ISBN",
-        values="Book-Rating",
-        fill_value=0
-    )
-
-    sparse_matrix = csr_matrix(
-        user_book_matrix.values
-    )
-
-    # --------------------------------------------------------
-    # Nearest-neighbor model
-    # --------------------------------------------------------
-
-    model = NearestNeighbors(
-        metric="cosine",
-        algorithm="brute",
-        n_neighbors=6,
-        n_jobs=-1
-    )
-
-    model.fit(
-        sparse_matrix
-    )
-
-    return (
-        filtered,
-        user_book_matrix,
-        sparse_matrix,
-        model
-    )
-
-
-(
-    filtered_ratings,
-    user_book_matrix,
-    sparse_matrix,
-    collaborative_model
-) = prepare_collaborative_model(
-    ratings
-)
-
-
-# ============================================================
-# CONTENT-BASED RECOMMENDATIONS
-# ============================================================
-
-def content_recommendations(
-    isbn,
-    top_n=50
-):
-
+def content_recommendations(isbn, top_n=50):
     matching_indices = books.index[
-        books["ISBN"].astype(str)
-        == str(isbn)
+        books["ISBN"].astype(str) == str(isbn)
     ].tolist()
 
     if not matching_indices:
@@ -493,29 +293,20 @@ def content_recommendations(
 
     book_index = matching_indices[0]
 
-    distances, indices = (
-        content_model.kneighbors(
-            tfidf_matrix[book_index],
-            n_neighbors=top_n + 1
-        )
+    n_neighbors = min(top_n + 1, len(books))
+
+    distances, indices = content_model.kneighbors(
+        tfidf_matrix[book_index],
+        n_neighbors=n_neighbors,
     )
 
     recommendations = []
 
-    for distance, index in zip(
-        distances[0][1:],
-        indices[0][1:]
-    ):
-
+    for distance, index in zip(distances[0][1:], indices[0][1:]):
         recommendations.append(
             {
-                "ISBN": str(
-                    books.iloc[index]["ISBN"]
-                ),
-                "Content Score": round(
-                    1 - distance,
-                    3
-                )
+                "ISBN": str(books.iloc[index]["ISBN"]),
+                "Content Score": round(float(1 - distance), 3),
             }
         )
 
@@ -523,667 +314,201 @@ def content_recommendations(
 
 
 # ============================================================
-# COLLABORATIVE RECOMMENDATIONS
+# NEURAL NETWORK RECOMMENDATION MODEL
 # ============================================================
 
-def collaborative_recommendations(
-    user_id,
-    top_n=50
-):
+def neural_network_recommendations(user_id, top_n=5):
+    """
+    Generate Top-N recommendations using the trained neural network.
 
-    if user_id not in user_book_matrix.index:
+    The neural model learns user and book embeddings from historical
+    user-book ratings and predicts a rating from 1 to 10.
+    """
+
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
         return []
 
-    user_index = (
-        user_book_matrix.index.get_loc(
-            user_id
-        )
-    )
-
-    distances, indices = (
-        collaborative_model.kneighbors(
-            sparse_matrix[user_index],
-            n_neighbors=6
-        )
-    )
-
-    recommendations = {}
-
-    already_rated = set(
-        ratings[
-            ratings["User-ID"] == user_id
-        ]["ISBN"].astype(str)
-    )
-
-    for distance, similar_index in zip(
-        distances[0][1:],
-        indices[0][1:]
-    ):
-
-        similarity = 1 - distance
-
-        similar_user = (
-            user_book_matrix.index[
-                similar_index
-            ]
-        )
-
-        similar_ratings = ratings[
-            ratings["User-ID"] == similar_user
-        ]
-
-        for _, row in (
-            similar_ratings.iterrows()
-        ):
-
-            isbn = str(
-                row["ISBN"]
-            )
-
-            rating = row[
-                "Book-Rating"
-            ]
-
-            # Only use books liked by similar users
-            if (
-                isbn not in already_rated
-                and rating >= 7
-            ):
-
-                score = (
-                    similarity * rating
-                )
-
-                recommendations[isbn] = (
-                    recommendations.get(
-                        isbn,
-                        0
-                    ) + score
-                )
-
-    sorted_recommendations = sorted(
-        recommendations.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    return [
-        {
-            "ISBN": isbn,
-            "Collaborative Score": score
-        }
-        for isbn, score
-        in sorted_recommendations[:top_n]
-    ]
-
-
-# ============================================================
-# HYBRID RECOMMENDATIONS
-# ============================================================
-
-def hybrid_recommendations(
-    user_id,
-    top_n=10
-):
-
-    user_ratings = ratings[
-        ratings["User-ID"] == user_id
-    ]
-
-    liked_books = user_ratings[
-        user_ratings["Book-Rating"] >= 5
-    ]
-
-    # --------------------------------------------------------
-    # CONTENT SCORES
-    # --------------------------------------------------------
-
-    content_scores = {}
-
-    for _, row in (
-        liked_books.iterrows()
-    ):
-
-        isbn = str(
-            row["ISBN"]
-        )
-
-        rating = row[
-            "Book-Rating"
-        ]
-
-        recommendations = (
-            content_recommendations(
-                isbn,
-                top_n=30
-            )
-        )
-
-        for recommendation in recommendations:
-
-            rec_isbn = str(
-                recommendation["ISBN"]
-            )
-
-            if rec_isbn == isbn:
-                continue
-
-            rec_rows = books[
-                books["ISBN"].astype(str)
-                == rec_isbn
-            ]
-
-            if rec_rows.empty:
-                continue
-
-            rec_row = rec_rows.iloc[0]
-
-            # ------------------------------------------------
-            # Filter unwanted material
-            # ------------------------------------------------
-
-            if is_non_book_material(
-                rec_row["Book-Title"],
-                rec_row["Book-Author"],
-                rec_row["Publisher"]
-            ):
-                continue
-
-            # ------------------------------------------------
-            # Remove duplicate edition
-            # ------------------------------------------------
-
-            original_rows = books[
-                books["ISBN"].astype(str)
-                == isbn
-            ]
-
-            if not original_rows.empty:
-
-                original_title = (
-                    original_rows.iloc[0]["Book-Title"]
-                )
-
-                if (
-                    normalize_title(
-                        rec_row["Book-Title"]
-                    )
-                    ==
-                    normalize_title(
-                        original_title
-                    )
-                ):
-                    continue
-
-            # ------------------------------------------------
-            # Weighted content score
-            # ------------------------------------------------
-
-            score = (
-                recommendation[
-                    "Content Score"
-                ]
-                * (rating / 10)
-            )
-
-            content_scores[rec_isbn] = max(
-                content_scores.get(
-                    rec_isbn,
-                    0
-                ),
-                score
-            )
-
-    # --------------------------------------------------------
-    # COLLABORATIVE SCORES
-    # --------------------------------------------------------
-
-    collaborative = (
-        collaborative_recommendations(
-            user_id,
-            top_n=50
-        )
-    )
-
-    collaborative_scores = {}
-
-    for item in collaborative:
-
-        isbn = str(
-            item["ISBN"]
-        )
-
-        rec_rows = books[
-            books["ISBN"].astype(str)
-            == isbn
-        ]
-
-        if rec_rows.empty:
-            continue
-
-        rec_row = rec_rows.iloc[0]
-
-        if is_non_book_material(
-            rec_row["Book-Title"],
-            rec_row["Book-Author"],
-            rec_row["Publisher"]
-        ):
-            continue
-
-        collaborative_scores[isbn] = (
-            item["Collaborative Score"]
-        )
-
-    # --------------------------------------------------------
-    # NORMALIZE CONTENT
-    # --------------------------------------------------------
-
-    if content_scores:
-
-        max_content = max(
-            content_scores.values()
-        )
-
-        if max_content > 0:
-
-            content_scores = {
-                isbn: score / max_content
-                for isbn, score
-                in content_scores.items()
-            }
-
-    # --------------------------------------------------------
-    # NORMALIZE COLLABORATIVE
-    # --------------------------------------------------------
-
-    if collaborative_scores:
-
-        max_collaborative = max(
-            collaborative_scores.values()
-        )
-
-        if max_collaborative > 0:
-
-            collaborative_scores = {
-                isbn: score / max_collaborative
-                for isbn, score
-                in collaborative_scores.items()
-            }
-
-    # --------------------------------------------------------
-    # COMBINE CANDIDATES
-    # --------------------------------------------------------
-
-    candidate_isbns = (
-        set(content_scores.keys())
-        |
-        set(collaborative_scores.keys())
-    )
-
-    already_rated = set(
-        user_ratings[
-            "ISBN"
+    if user_id not in neural_user_to_index:
+        return []
+
+    user_index = neural_user_to_index[user_id]
+
+    # Books already rated by the selected user are not recommended again.
+    rated_isbns = set(
+        ratings.loc[
+            ratings["User-ID"] == user_id,
+            "ISBN",
         ].astype(str)
     )
 
-    results = []
+    candidate_isbns = [
+        str(isbn)
+        for isbn in neural_book_to_index.keys()
+        if str(isbn) not in rated_isbns
+    ]
 
-    for isbn in candidate_isbns:
+    if not candidate_isbns:
+        return []
 
-        if isbn in already_rated:
-            continue
-
-        rec_rows = books[
-            books["ISBN"].astype(str)
-            == isbn
-        ]
-
-        if rec_rows.empty:
-            continue
-
-        rec_row = rec_rows.iloc[0]
-
-        # ------------------------------------------------
-        # Remove unwanted material
-        # ------------------------------------------------
-
-        if is_non_book_material(
-            rec_row["Book-Title"],
-            rec_row["Book-Author"],
-            rec_row["Publisher"]
-        ):
-            continue
-
-        # ------------------------------------------------
-        # Scores
-        # ------------------------------------------------
-
-        content_score = (
-            content_scores.get(
-                isbn,
-                0
-            )
-        )
-
-        collaborative_score = (
-            collaborative_scores.get(
-                isbn,
-                0
-            )
-        )
-
-        hybrid_score = (
-            0.5 * content_score
-            +
-            0.5 * collaborative_score
-        )
-
-        results.append(
-            {
-                "ISBN": isbn,
-                "Content Score": content_score,
-                "Collaborative Score":
-                    collaborative_score,
-                "Hybrid Score":
-                    hybrid_score
-            }
-        )
-
-    # --------------------------------------------------------
-    # SORT
-    # --------------------------------------------------------
-
-    results.sort(
-        key=lambda x: x["Hybrid Score"],
-        reverse=True
+    candidate_book_indices = np.array(
+        [neural_book_to_index[isbn] for isbn in candidate_isbns],
+        dtype=np.int32,
     )
 
-    # --------------------------------------------------------
-    # Remove duplicate book titles
-    # --------------------------------------------------------
+    user_indices = np.full(
+        len(candidate_book_indices),
+        user_index,
+        dtype=np.int32,
+    )
 
-    final_results = []
+    predicted_ratings = neural_model.predict(
+        [user_indices, candidate_book_indices],
+        batch_size=1024,
+        verbose=0,
+    ).reshape(-1)
 
-    seen_titles = set()
+    predicted_ratings = np.clip(predicted_ratings, 1, 10)
 
-    for item in results:
+    predictions = pd.DataFrame(
+        {
+            "ISBN": candidate_isbns,
+            "Predicted Rating": predicted_ratings,
+        }
+    )
 
-        book_rows = books[
-            books["ISBN"].astype(str)
-            == str(item["ISBN"])
-        ]
+    predictions = predictions.merge(
+        books[
+            [
+                "ISBN",
+                "Book-Title",
+                "Book-Author",
+                "Publisher",
+            ]
+        ],
+        on="ISBN",
+        how="left",
+    )
 
-        if book_rows.empty:
-            continue
+    predictions = predictions.dropna(subset=["Book-Title"])
 
-        title = str(
-            book_rows.iloc[0]["Book-Title"]
+    predictions = predictions[
+        ~predictions.apply(
+            lambda row: is_non_book_material(
+                row["Book-Title"],
+                row["Book-Author"],
+                row["Publisher"],
+            ),
+            axis=1,
         )
+    ]
 
-        normalized = normalize_title(
-            title
-        )
+    predictions["Normalized Title"] = predictions["Book-Title"].apply(
+        normalize_title
+    )
 
-        if normalized in seen_titles:
-            continue
+    predictions = predictions[
+        predictions["Normalized Title"].str.len() > 0
+    ]
 
-        seen_titles.add(
-            normalized
-        )
+    predictions = predictions.sort_values(
+        "Predicted Rating",
+        ascending=False,
+    )
 
-        final_results.append(item)
+    # Keep one recommendation per normalized title.
+    predictions = predictions.drop_duplicates(
+        subset=["Normalized Title"],
+        keep="first",
+    )
 
-        if len(final_results) >= top_n:
-            break
-
-    return final_results
+    return predictions.head(top_n).to_dict("records")
 
 
 # ============================================================
-# NEW USER RECOMMENDATIONS
+# NEW USER CONTENT-BASED RECOMMENDATIONS
 # ============================================================
 
-def new_user_recommendations(
-    selected_books,
-    top_n=5
-):
+def new_user_recommendations(selected_books, top_n=5):
+    """Create recommendations for a user with no training history."""
 
     content_scores = {}
 
-    # --------------------------------------------------------
-    # SELECTED ISBNs
-    # --------------------------------------------------------
-
-    selected_isbns = {
-        str(isbn)
-        for isbn, rating
-        in selected_books
-    }
-
-    # --------------------------------------------------------
-    # SELECTED TITLES
-    # --------------------------------------------------------
-
-    selected_titles = set()
-
-    for isbn in selected_isbns:
-
-        selected_rows = books[
-            books["ISBN"].astype(str)
-            == isbn
-        ]
-
-        for _, row in (
-            selected_rows.iterrows()
-        ):
-
-            selected_titles.add(
-                normalize_title(
-                    row["Book-Title"]
-                )
-            )
-
-    # --------------------------------------------------------
-    # CONTENT RECOMMENDATIONS
-    # --------------------------------------------------------
+    selected_isbns = {str(isbn) for isbn, _ in selected_books}
 
     for isbn, rating in selected_books:
+        weight = max(float(rating), 1.0) / 10.0
 
-        recommendations = (
-            content_recommendations(
-                isbn,
-                top_n=50
-            )
-        )
+        for recommendation in content_recommendations(
+            isbn,
+            top_n=50,
+        ):
+            rec_isbn = str(recommendation["ISBN"])
 
-        for recommendation in recommendations:
-
-            rec_isbn = str(
-                recommendation["ISBN"]
-            )
-
-            # Don't recommend selected ISBN
             if rec_isbn in selected_isbns:
                 continue
 
-            # ------------------------------------------------
-            # Get book information
-            # ------------------------------------------------
-
-            rec_rows = books[
-                books["ISBN"].astype(str)
-                == rec_isbn
-            ]
-
-            if rec_rows.empty:
-                continue
-
-            rec_row = rec_rows.iloc[0]
-
-            rec_title = str(
-                rec_row["Book-Title"]
+            score = float(recommendation["Content Score"])
+            content_scores[rec_isbn] = (
+                content_scores.get(rec_isbn, 0.0)
+                + score * weight
             )
-
-            rec_author = str(
-                rec_row["Book-Author"]
-            )
-
-            rec_publisher = str(
-                rec_row["Publisher"]
-            )
-
-            # ------------------------------------------------
-            # FILTER STUDY MATERIAL
-            # ------------------------------------------------
-
-            if is_non_book_material(
-                rec_title,
-                rec_author,
-                rec_publisher
-            ):
-                continue
-
-            # ------------------------------------------------
-            # REMOVE DUPLICATE EDITIONS
-            # ------------------------------------------------
-
-            normalized_rec_title = (
-                normalize_title(
-                    rec_title
-                )
-            )
-
-            if (
-                normalized_rec_title
-                in selected_titles
-            ):
-                continue
-
-            # ------------------------------------------------
-            # SCORE
-            # ------------------------------------------------
-
-            similarity = float(
-                recommendation[
-                    "Content Score"
-                ]
-            )
-
-            weighted_score = (
-                similarity
-                * (rating / 10)
-            )
-
-            content_scores[rec_isbn] = max(
-                content_scores.get(
-                    rec_isbn,
-                    0
-                ),
-                weighted_score
-            )
-
-    # --------------------------------------------------------
-    # NO RESULTS
-    # --------------------------------------------------------
 
     if not content_scores:
         return []
 
-    # --------------------------------------------------------
-    # NORMALIZE
-    # --------------------------------------------------------
-
-    max_score = max(
-        content_scores.values()
-    )
-
-    if max_score > 0:
-
-        content_scores = {
-            isbn: score / max_score
-            for isbn, score
-            in content_scores.items()
-        }
-
-    # --------------------------------------------------------
-    # SORT
-    # --------------------------------------------------------
-
-    sorted_scores = sorted(
-        content_scores.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # --------------------------------------------------------
-    # FINAL FILTER
-    # --------------------------------------------------------
-
-    final_results = []
-
-    already_added_titles = set()
-
-    for isbn, score in sorted_scores:
-
-        book_rows = books[
-            books["ISBN"].astype(str)
-            == str(isbn)
-        ]
-
-        if book_rows.empty:
-            continue
-
-        row = book_rows.iloc[0]
-
-        title = str(
-            row["Book-Title"]
-        )
-
-        author = str(
-            row["Book-Author"]
-        )
-
-        publisher = str(
-            row["Publisher"]
-        )
-
-        # ------------------------------------------------
-        # Remove study material
-        # ------------------------------------------------
-
-        if is_non_book_material(
-            title,
-            author,
-            publisher
-        ):
-            continue
-
-        # ------------------------------------------------
-        # Remove duplicate editions
-        # ------------------------------------------------
-
-        normalized_title = normalize_title(
-            title
-        )
-
-        if normalized_title in already_added_titles:
-            continue
-
-        already_added_titles.add(
-            normalized_title
-        )
-
-        final_results.append(
+    result = pd.DataFrame(
+        [
             {
-                "ISBN": str(isbn),
-                "Content Score": score
+                "ISBN": isbn,
+                "Content Score": score,
             }
+            for isbn, score in content_scores.items()
+        ]
+    )
+
+    result = result.merge(
+        books[
+            [
+                "ISBN",
+                "Book-Title",
+                "Book-Author",
+                "Publisher",
+            ]
+        ],
+        on="ISBN",
+        how="left",
+    )
+
+    result = result.dropna(subset=["Book-Title"])
+
+    result = result[
+        ~result.apply(
+            lambda row: is_non_book_material(
+                row["Book-Title"],
+                row["Book-Author"],
+                row["Publisher"],
+            ),
+            axis=1,
         )
+    ]
 
-        if len(final_results) >= top_n:
-            break
+    result["Normalized Title"] = result["Book-Title"].apply(
+        normalize_title
+    )
 
-    return final_results
+    result = result.sort_values(
+        "Content Score",
+        ascending=False,
+    )
+
+    result = result.drop_duplicates(
+        subset=["Normalized Title"],
+        keep="first",
+    )
+
+    return result.head(top_n).to_dict("records")
 
 
 # ============================================================
@@ -1191,57 +516,45 @@ def new_user_recommendations(
 # ============================================================
 
 with st.sidebar:
-
-    st.markdown(
-        "## ⚙️ Recommendation Settings"
-    )
-
+    st.markdown("## 🧠 AI Recommendation System")
     st.markdown("---")
 
-    st.markdown(
-        "### 🤖 AI Techniques"
-    )
-
+    st.markdown("### 🤖 AI Techniques")
     st.markdown(
         """
-        **1. Content-Based Filtering**
+        **1. Neural Network Recommendation**
 
-        Uses TF-IDF and cosine similarity.
+        Learns user and book embeddings from historical ratings.
 
-        **2. Collaborative Filtering**
+        **2. Content-Based Filtering**
 
-        Uses user similarity and rating patterns.
+        Uses TF-IDF and cosine similarity for new-user cold start.
 
-        **3. Hybrid Recommendation**
+        **3. Baseline / Experimental Models**
 
-        Combines both recommendation signals.
+        Earlier content-based, collaborative and hybrid approaches
+        are retained for comparison and experimentation.
         """
     )
 
     st.markdown("---")
 
-    st.markdown(
-        "### 🧠 Recommendation Logic"
-    )
-
+    st.markdown("### 🧠 Recommendation Logic")
     st.markdown(
         """
         **Existing User**
 
-        Content + Collaborative → Hybrid
+        User ID → Neural Network → Predicted Ratings → Top-N
 
         **New User**
 
-        User Preferences → Content-Based
+        Selected Books + Ratings → Content-Based → Top-N
         """
     )
 
     st.markdown("---")
 
-    st.markdown(
-        "### 🛡️ Recommendation Quality"
-    )
-
+    st.markdown("### 🛡️ Recommendation Quality")
     st.markdown(
         """
         The system filters:
@@ -1259,10 +572,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
-
-    st.caption(
-        "AI-Based Intelligent Book Recommendation System"
-    )
+    st.caption("AI-Based Intelligent Book Recommendation System")
 
 
 # ============================================================
@@ -1275,18 +585,17 @@ st.markdown(
         📚 AI-Based Intelligent Book Recommendation System
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 st.markdown(
     """
     <div class="subtitle">
-        Personalized book recommendations using
-        Content-Based Filtering, Collaborative Filtering,
-        and Hybrid Recommendation.
+        Personalized book recommendations using a trained Neural Network,
+        with Content-Based Filtering for new-user cold-start recommendations.
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
@@ -1297,86 +606,61 @@ st.markdown(
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-
     st.markdown(
         f"""
         <div class="stat-card">
-            <div class="stat-value">
-                {len(books):,}
-            </div>
-            <div class="stat-label">
-                Books
-            </div>
+            <div class="stat-value">{len(books):,}</div>
+            <div class="stat-label">Books</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 with col2:
-
     st.markdown(
         f"""
         <div class="stat-card">
-            <div class="stat-value">
-                {ratings["User-ID"].nunique():,}
-            </div>
-            <div class="stat-label">
-                Rated Users
-            </div>
+            <div class="stat-value">{ratings["User-ID"].nunique():,}</div>
+            <div class="stat-label">Rated Users</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 with col3:
-
     st.markdown(
         f"""
         <div class="stat-card">
-            <div class="stat-value">
-                {len(ratings):,}
-            </div>
-            <div class="stat-label">
-                Ratings
-            </div>
+            <div class="stat-value">{len(ratings):,}</div>
+            <div class="stat-label">Ratings</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 with col4:
-
     st.markdown(
-        f"""
+        """
         <div class="stat-card">
-            <div class="stat-value">
-                {len(user_book_matrix):,}
-            </div>
-            <div class="stat-label">
-                Active Users
-            </div>
+            <div class="stat-value">Neural</div>
+            <div class="stat-label">Primary AI Model</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
 # ============================================================
-# RECOMMENDATION MODE
+# RECOMMENDATION TABS
 # ============================================================
 
 st.markdown(
-    '<div class="section-title">'
-    '👤 Choose Recommendation Mode'
-    '</div>',
-    unsafe_allow_html=True
+    '<div class="section-title">👤 Choose Recommendation Mode</div>',
+    unsafe_allow_html=True,
 )
 
 existing_tab, new_tab = st.tabs(
-    [
-        "👤 Existing User",
-        "🆕 New User"
-    ]
+    ["👤 Existing User", "🆕 New User"]
 )
 
 
@@ -1385,630 +669,119 @@ existing_tab, new_tab = st.tabs(
 # ============================================================
 
 with existing_tab:
-
     st.info(
-        "Existing users receive recommendations using "
-        "**Content-Based + Collaborative + Hybrid Filtering**."
+        "Existing users receive personalized recommendations using "
+        "the **trained Neural Network model**. The model learns user and "
+        "book representations from historical rating data and predicts "
+        "ratings for books the user has not rated."
     )
-
-    # --------------------------------------------------------
-    # USER SELECTION
-    # --------------------------------------------------------
 
     available_users = sorted(
-        user_book_matrix.index.tolist()
+        int(user_id) for user_id in neural_user_to_index.keys()
     )
 
-    default_index = (
-        available_users.index(8)
-        if 8 in available_users
-        else 0
-    )
-
-    selected_user = st.selectbox(
-        "Select User ID",
-        available_users,
-        index=default_index,
-        key="existing_user"
-    )
-
-    top_n_existing = st.slider(
-        "Number of Recommendations",
-        min_value=5,
-        max_value=10,
-        value=5,
-        key="existing_top_n"
-    )
-
-    # --------------------------------------------------------
-    # USER HISTORY
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '📖 User Reading History'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    user_history = ratings[
-        ratings["User-ID"]
-        == selected_user
-    ].merge(
-        books,
-        on="ISBN",
-        how="left"
-    )
-
-    if not user_history.empty:
-
-        history_display = (
-            user_history[
-                [
-                    "Book-Title",
-                    "Book-Author",
-                    "Book-Rating"
-                ]
-            ]
-            .sort_values(
-                "Book-Rating",
-                ascending=False
-            )
-            .head(10)
-        )
-
-        st.dataframe(
-            history_display,
-            width="stretch",
-            hide_index=True
-        )
-
+    if not available_users:
+        st.error("No users are available in the neural-network mapping.")
     else:
-
-        st.warning(
-            "No rating history available."
+        default_index = (
+            available_users.index(8)
+            if 8 in available_users
+            else 0
         )
 
-    # --------------------------------------------------------
-    # GENERATE
-    # --------------------------------------------------------
+        selected_user = st.selectbox(
+            "Select User ID",
+            available_users,
+            index=default_index,
+            key="existing_user",
+        )
 
-    generate_existing = st.button(
-        "✨ Generate Personalized Recommendations",
-        type="primary",
-        width="stretch",
-        key="generate_existing"
-    )
-
-    if generate_existing:
-
-        with st.spinner(
-            "🤖 AI is generating personalized recommendations..."
-        ):
-
-            recommendations = (
-                hybrid_recommendations(
-                    selected_user,
-                    top_n_existing
-                )
-            )
+        top_n_existing = st.slider(
+            "Number of Recommendations",
+            min_value=5,
+            max_value=10,
+            value=5,
+            key="existing_top_n",
+        )
 
         st.markdown(
-            '<div class="section-title">'
-            '🎯 Top Recommended Books'
-            '</div>',
-            unsafe_allow_html=True
+            '<div class="section-title">📖 User Reading History</div>',
+            unsafe_allow_html=True,
         )
 
-        if recommendations:
-
-            recommendation_df = (
-                pd.DataFrame(
-                    recommendations
-                )
+        user_history = (
+            ratings[ratings["User-ID"] == selected_user]
+            [["ISBN", "Book-Rating"]]
+            .merge(
+                books[["ISBN", "Book-Title", "Book-Author"]],
+                on="ISBN",
+                how="left",
             )
+        )
 
-            recommendation_df = (
-                recommendation_df.merge(
-                    books[
-                        [
-                            "ISBN",
-                            "Book-Title",
-                            "Book-Author",
-                            "Publisher"
-                        ]
-                    ],
-                    on="ISBN",
-                    how="left"
-                )
-            )
+        # Some ratings in the original dataset do not have matching book
+        # metadata. Do not display rows containing None as if they were books.
+        user_history = user_history.dropna(subset=["Book-Title"])
 
-            for rank, (_, row) in enumerate(
-                recommendation_df.iterrows(),
-                start=1
-            ):
-
-                title = str(
-                    row["Book-Title"]
-                )
-
-                author = str(
-                    row["Book-Author"]
-                )
-
-                publisher = str(
-                    row["Publisher"]
-                )
-
-                content_score = float(
-                    row["Content Score"]
-                )
-
-                collaborative_score = float(
-                    row["Collaborative Score"]
-                )
-
-                hybrid_score = float(
-                    row["Hybrid Score"]
-                )
-
-                if (
-                    content_score > 0
-                    and collaborative_score > 0
-                ):
-
-                    explanation = (
-                        "Recommended using both book-content "
-                        "similarity and preferences of similar users."
-                    )
-
-                elif content_score > 0:
-
-                    explanation = (
-                        "Recommended primarily because its "
-                        "content is similar to books you liked."
-                    )
-
-                else:
-
-                    explanation = (
-                        "Recommended primarily from the "
-                        "reading patterns of similar users."
-                    )
-
-                st.markdown(
-                    f"""
-                    <div class="book-card">
-                        <div class="book-title">
-                            #{rank} 📚 {title}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                st.caption(
-                    f"{author} • {publisher}"
-                )
-
-                score1, score2, score3 = st.columns(3)
-
-                with score1:
-
-                    st.metric(
-                        "Content Score",
-                        f"{content_score:.3f}"
-                    )
-
-                with score2:
-
-                    st.metric(
-                        "Collaborative Score",
-                        f"{collaborative_score:.3f}"
-                    )
-
-                with score3:
-
-                    st.metric(
-                        "Hybrid Score",
-                        f"{hybrid_score:.3f}"
-                    )
-
-                st.markdown(
-                    f"""
-                    <div class="explanation">
-                        🧠 <b>Why was this recommended?</b><br>
-                        {explanation}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            # ------------------------------------------------
-            # CHART
-            # ------------------------------------------------
-
-            st.markdown(
-                '<div class="section-title">'
-                '📊 Recommendation Score Analysis'
-                '</div>',
-                unsafe_allow_html=True
-            )
-
-            chart_df = (
-                recommendation_df[
+        if not user_history.empty:
+            history_display = (
+                user_history[
                     [
                         "Book-Title",
-                        "Content Score",
-                        "Collaborative Score",
-                        "Hybrid Score"
+                        "Book-Author",
+                        "Book-Rating",
                     ]
                 ]
-                .set_index(
-                    "Book-Title"
+                .sort_values(
+                    "Book-Rating",
+                    ascending=False,
                 )
+                .head(10)
             )
 
-            st.bar_chart(
-                chart_df,
-                width="stretch"
+            st.dataframe(
+                history_display,
+                width="stretch",
+                hide_index=True,
             )
-
         else:
-
-            st.warning(
-                "No recommendations could be generated."
-            )
-
-
-# ============================================================
-# NEW USER
-# ============================================================
-
-with new_tab:
-
-    st.info(
-        "🆕 New users can select books they like and rate them. "
-        "Because a new user has no previous interaction history, "
-        "the system uses **Content-Based Filtering** to handle "
-        "the initial cold-start problem."
-    )
-
-    # --------------------------------------------------------
-    # NAME
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '👋 Tell Us About Yourself'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    user_name = st.text_input(
-        "Your Name",
-        placeholder="Enter your name",
-        key="new_user_name"
-    )
-
-    # --------------------------------------------------------
-    # BOOK SELECTION
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '📚 Select Books You Like'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    st.write(
-        "Search for books you like and select up to "
-        "5 books to create your preference profile."
-    )
-
-    book_options = (
-        books[
-            [
-                "ISBN",
-                "Book-Title",
-                "Book-Author"
-            ]
-        ]
-        .drop_duplicates(
-            subset=["Book-Title"]
-        )
-        .dropna(
-            subset=["Book-Title"]
-        )
-        .copy()
-    )
-
-    book_options["ISBN"] = (
-        book_options["ISBN"]
-        .astype(str)
-    )
-
-    book_options["Book-Title"] = (
-        book_options["Book-Title"]
-        .astype(str)
-    )
-
-    book_options["Book-Author"] = (
-        book_options["Book-Author"]
-        .fillna("Unknown Author")
-        .astype(str)
-    )
-
-    # --------------------------------------------------------
-    # SEARCH
-    # --------------------------------------------------------
-
-    search_text = st.text_input(
-        "🔎 Search for a book",
-        placeholder=(
-            "Example: Harry Potter, Hobbit, "
-            "Pride and Prejudice..."
-        ),
-        key="book_search"
-    )
-
-    if search_text.strip():
-
-        search_results = (
-            book_options[
-                book_options[
-                    "Book-Title"
-                ].str.contains(
-                    search_text.strip(),
-                    case=False,
-                    na=False
-                )
-            ]
-            .head(50)
-        )
-
-    else:
-
-        search_results = pd.DataFrame(
-            columns=book_options.columns
-        )
-
-    # --------------------------------------------------------
-    # SEARCH RESULTS
-    # --------------------------------------------------------
-
-    if not search_results.empty:
-
-        st.markdown(
-            f"""
-            <div class="search-info">
-                🔎 Found <b>{len(search_results)}</b>
-                matching books.
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        search_options = (
-            search_results[
-                "ISBN"
-            ]
-            .astype(str)
-            .tolist()
-        )
-
-        search_lookup = {}
-
-        for _, row in (
-            search_results.iterrows()
-        ):
-
-            isbn = str(
-                row["ISBN"]
-            )
-
-            title = str(
-                row["Book-Title"]
-            )
-
-            author = str(
-                row["Book-Author"]
-            )
-
-            search_lookup[isbn] = (
-                f"{title} — {author}"
-            )
-
-        selected_from_search = (
-            st.multiselect(
-                "Select books you like",
-                options=search_options,
-                format_func=lambda isbn:
-                    search_lookup.get(
-                        isbn,
-                        isbn
-                    ),
-                max_selections=5,
-                key="searched_books"
-            )
-        )
-
-    else:
-
-        selected_from_search = []
-
-        if search_text.strip():
-
-            st.warning(
-                "No books found. "
-                "Try a different search term."
-            )
-
-        else:
-
             st.info(
-                "Enter a book title above to search."
+                "This user has rating records, but the rated books do not "
+                "have matching metadata in the cleaned book dataset."
             )
 
-    # --------------------------------------------------------
-    # RATING
-    # --------------------------------------------------------
-
-    if selected_from_search:
-
-        st.markdown(
-            "### ⭐ Rate Your Selected Books"
+        generate_existing = st.button(
+            "✨ Generate Neural Network Recommendations",
+            type="primary",
+            width="stretch",
+            key="generate_existing",
         )
 
-        selected_books_with_ratings = []
-
-        for isbn in selected_from_search:
-
-            book_info = book_options[
-                book_options[
-                    "ISBN"
-                ].astype(str)
-                == str(isbn)
-            ]
-
-            if not book_info.empty:
-
-                title = str(
-                    book_info.iloc[0][
-                        "Book-Title"
-                    ]
-                )
-
-                author = str(
-                    book_info.iloc[0][
-                        "Book-Author"
-                    ]
-                )
-
-                rating = st.slider(
-                    f"{title} — {author}",
-                    min_value=1,
-                    max_value=10,
-                    value=8,
-                    key=f"rating_{isbn}"
-                )
-
-                selected_books_with_ratings.append(
-                    (
-                        str(isbn),
-                        rating
-                    )
-                )
-
-    else:
-
-        selected_books_with_ratings = []
-
-    # --------------------------------------------------------
-    # GENERATE
-    # --------------------------------------------------------
-
-    generate_new = st.button(
-        "🚀 Get My Recommendations",
-        type="primary",
-        width="stretch",
-        key="generate_new"
-    )
-
-    if generate_new:
-
-        if not selected_books_with_ratings:
-
-            st.warning(
-                "Please search for and select at least "
-                "one book before generating recommendations."
-            )
-
-        else:
-
+        if generate_existing:
             with st.spinner(
-                "🤖 AI is learning your preferences..."
+                "🤖 Neural network is generating personalized recommendations..."
             ):
-
-                new_recommendations = (
-                    new_user_recommendations(
-                        selected_books_with_ratings,
-                        top_n=5
-                    )
-                )
-
-            # ------------------------------------------------
-            # SUCCESS MESSAGE
-            # ------------------------------------------------
-
-            if user_name.strip():
-
-                st.success(
-                    f"Great, {user_name}! "
-                    "Here are your personalized recommendations."
-                )
-
-            else:
-
-                st.success(
-                    "Here are your personalized recommendations."
+                recommendations = neural_network_recommendations(
+                    selected_user,
+                    top_n_existing,
                 )
 
             st.markdown(
-                '<div class="section-title">'
-                '🎯 Recommended For You'
-                '</div>',
-                unsafe_allow_html=True
+                '<div class="section-title">🎯 Top Recommended Books</div>',
+                unsafe_allow_html=True,
             )
 
-            # ------------------------------------------------
-            # RESULTS
-            # ------------------------------------------------
-
-            if new_recommendations:
-
-                recommendation_df = (
-                    pd.DataFrame(
-                        new_recommendations
-                    )
-                )
-
-                recommendation_df = (
-                    recommendation_df.merge(
-                        books[
-                            [
-                                "ISBN",
-                                "Book-Title",
-                                "Book-Author",
-                                "Publisher"
-                            ]
-                        ],
-                        on="ISBN",
-                        how="left"
-                    )
-                )
+            if recommendations:
+                recommendation_df = pd.DataFrame(recommendations)
 
                 for rank, (_, row) in enumerate(
                     recommendation_df.iterrows(),
-                    start=1
+                    start=1,
                 ):
-
-                    title = str(
-                        row["Book-Title"]
-                    )
-
-                    author = str(
-                        row["Book-Author"]
-                    )
-
-                    publisher = str(
-                        row["Publisher"]
-                    )
-
-                    score = float(
-                        row["Content Score"]
-                    )
+                    title = str(row["Book-Title"])
+                    author = str(row["Book-Author"])
+                    publisher = str(row["Publisher"])
+                    predicted_rating = float(row["Predicted Rating"])
 
                     st.markdown(
                         f"""
@@ -2018,35 +791,375 @@ with new_tab:
                             </div>
                         </div>
                         """,
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
                     )
 
-                    st.caption(
-                        f"{author} • {publisher}"
-                    )
+                    st.caption(f"{author} • {publisher}")
 
                     st.metric(
-                        "Content Similarity Score",
-                        f"{score:.3f}"
+                        "Predicted Rating",
+                        f"{predicted_rating:.2f} / 10",
                     )
 
                     st.markdown(
                         """
                         <div class="explanation">
                             🧠 <b>Why was this recommended?</b><br>
-                            This book was recommended because its
-                            content is similar to the books you
-                            selected and rated highly.
+                            The trained neural network learned the relationship
+                            between users and books from historical rating data.
+                            This book received a high predicted rating for the
+                            selected user, so it was placed among the Top-N
+                            recommendations.
                         </div>
                         """,
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown(
+                    '<div class="section-title">📊 Predicted Rating Analysis</div>',
+                    unsafe_allow_html=True,
+                )
+
+                chart_df = recommendation_df[
+                    ["Book-Title", "Predicted Rating"]
+                ].set_index("Book-Title")
+
+                st.bar_chart(
+                    chart_df,
+                    width="stretch",
+                )
+            else:
+                st.warning(
+                    "No recommendations could be generated for this user."
+                )
+
+
+# ============================================================
+# NEW USER
+# ============================================================
+
+with new_tab:
+    st.info(
+        "🆕 New users can select books they like and rate them. "
+        "Because a new user has no learned neural-network user embedding, "
+        "the system uses **Content-Based Filtering** to handle the initial "
+        "cold-start problem."
+    )
+
+    st.markdown(
+        '<div class="section-title">👋 Tell Us About Yourself</div>',
+        unsafe_allow_html=True,
+    )
+
+    user_name = st.text_input(
+        "Your Name",
+        placeholder="Enter your name",
+        key="new_user_name",
+    )
+
+    st.markdown(
+        '<div class="section-title">📚 Select Books You Like</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.write(
+        "Search for books you like and select up to 5 books "
+        "to create your preference profile."
+    )
+
+    book_options = (
+        books[
+            [
+                "ISBN",
+                "Book-Title",
+                "Book-Author",
+            ]
+        ]
+        .drop_duplicates(subset=["Book-Title"])
+        .dropna(subset=["Book-Title"])
+        .copy()
+    )
+
+    book_options["ISBN"] = book_options["ISBN"].astype(str)
+    book_options["Book-Title"] = book_options["Book-Title"].astype(str)
+    book_options["Book-Author"] = (
+        book_options["Book-Author"]
+        .fillna("Unknown Author")
+        .astype(str)
+    )
+
+    # Build the searchable index only once. This avoids scanning and
+    # normalizing all 271k+ books every time the user types a character.
+    @st.cache_resource
+    def prepare_book_search_index():
+        indexed = book_options[[
+            "ISBN",
+            "Book-Title",
+            "Book-Author",
+        ]].copy()
+
+        indexed["_title_lower"] = indexed["Book-Title"].str.lower()
+        indexed["_author_lower"] = indexed["Book-Author"].str.lower()
+        indexed["_title_compact"] = indexed["_title_lower"].str.replace(
+            r"[^a-z0-9]", "", regex=True
+        )
+        indexed["_author_compact"] = indexed["_author_lower"].str.replace(
+            r"[^a-z0-9]", "", regex=True
+        )
+        return indexed
+
+    search_index = prepare_book_search_index()
+
+    search_text = st.text_input(
+        "🔎 Search for a book",
+        placeholder="Example: Harry Potter, Hobbit, Pride and Prejudice...",
+        key="book_search",
+    )
+
+    if search_text.strip():
+        query = search_text.strip()
+        query_lower = query.lower()
+
+        # ----------------------------------------------------
+        # 1. FAST NORMAL SEARCH
+        # ----------------------------------------------------
+        # Search the pre-built lowercase index instead of repeatedly
+        # converting the entire dataset.
+        search_mask = (
+            search_index["_title_lower"].str.contains(
+                query_lower, case=False, na=False, regex=False
+            )
+            | search_index["_author_lower"].str.contains(
+                query_lower, case=False, na=False, regex=False
+            )
+        )
+
+        search_results = search_index.loc[
+            search_mask, ["ISBN", "Book-Title", "Book-Author"]
+        ].copy()
+
+        # ----------------------------------------------------
+        # 2. FAST FUZZY FALLBACK
+        # ----------------------------------------------------
+        # Example: "madolduwa" -> "Madol Doova"
+        # Instead of comparing against every book, first create a
+        # small candidate set using the first 3-4 normalized letters.
+        if search_results.empty and len(query_lower) >= 3:
+            compact_query = re.sub(r"[^a-z0-9]", "", query_lower)
+
+            if len(compact_query) >= 4:
+                seed = compact_query[:4]
+            else:
+                seed = compact_query[:3]
+
+            candidate_mask = (
+                search_index["_title_compact"].str.contains(
+                    seed, case=False, na=False, regex=False
+                )
+                | search_index["_author_compact"].str.contains(
+                    seed, case=False, na=False, regex=False
+                )
+            )
+
+            candidates = search_index.loc[candidate_mask].copy()
+
+            # If the 4-character seed is too strict, fall back to 3 chars.
+            if candidates.empty and len(seed) >= 4:
+                seed = compact_query[:3]
+                candidate_mask = (
+                    search_index["_title_compact"].str.contains(
+                        seed, case=False, na=False, regex=False
+                    )
+                    | search_index["_author_compact"].str.contains(
+                        seed, case=False, na=False, regex=False
+                    )
+                )
+                candidates = search_index.loc[candidate_mask].copy()
+
+            # Only run the relatively expensive difflib calculation on
+            # this small candidate set.
+            if not candidates.empty:
+                fuzzy_scores = []
+                query_words = set(re.findall(r"[a-z0-9]+", query_lower))
+
+                for idx, row in candidates.iterrows():
+                    title_compact = row["_title_compact"]
+                    author_compact = row["_author_compact"]
+
+                    title_score = difflib.SequenceMatcher(
+                        None, compact_query, title_compact
+                    ).ratio()
+                    author_score = difflib.SequenceMatcher(
+                        None, compact_query, author_compact
+                    ).ratio()
+
+                    title_words = set(
+                        re.findall(r"[a-z0-9]+", str(row["Book-Title"]).lower())
+                    )
+                    word_bonus = (
+                        0.15
+                        if query_words and query_words.issubset(title_words)
+                        else 0.0
+                    )
+
+                    score = max(title_score, author_score * 0.9) + word_bonus
+
+                    if score >= 0.45:
+                        fuzzy_scores.append((idx, score))
+
+                if fuzzy_scores:
+                    fuzzy_scores.sort(key=lambda item: item[1], reverse=True)
+                    best_indices = [idx for idx, _ in fuzzy_scores[:50]]
+                    search_results = search_index.loc[
+                        best_indices, ["ISBN", "Book-Title", "Book-Author"]
+                    ].copy()
+
+    else:
+        search_results = pd.DataFrame(columns=book_options.columns)
+
+    if not search_results.empty:
+        st.markdown(
+            f"""
+            <div class="search-info">
+                🔎 Found <b>{len(search_results)}</b> matching books.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        search_options = search_results["ISBN"].astype(str).tolist()
+
+        search_lookup = {}
+        for _, row in search_results.iterrows():
+            isbn = str(row["ISBN"])
+            title = str(row["Book-Title"])
+            author = str(row["Book-Author"])
+            search_lookup[isbn] = f"{title} — {author}"
+
+        selected_from_search = st.multiselect(
+            "Select books you like",
+            options=search_options,
+            format_func=lambda isbn: search_lookup.get(isbn, isbn),
+            max_selections=5,
+            key="searched_books",
+        )
+    else:
+        selected_from_search = []
+
+        if search_text.strip():
+            st.warning(
+                "No books found. Try a different search term."
+            )
+        else:
+            st.info("Enter a book title above to search.")
+
+    selected_books_with_ratings = []
+
+    if selected_from_search:
+        st.markdown("### ⭐ Rate Your Selected Books")
+
+        for isbn in selected_from_search:
+            book_info = book_options[
+                book_options["ISBN"].astype(str) == str(isbn)
+            ]
+
+            if not book_info.empty:
+                title = str(book_info.iloc[0]["Book-Title"])
+                author = str(book_info.iloc[0]["Book-Author"])
+
+                rating = st.slider(
+                    f"{title} — {author}",
+                    min_value=1,
+                    max_value=10,
+                    value=8,
+                    key=f"rating_{isbn}",
+                )
+
+                selected_books_with_ratings.append(
+                    (str(isbn), rating)
+                )
+
+    generate_new = st.button(
+        "🚀 Get My Recommendations",
+        type="primary",
+        width="stretch",
+        key="generate_new",
+    )
+
+    if generate_new:
+        if not selected_books_with_ratings:
+            st.warning(
+                "Please search for and select at least one book "
+                "before generating recommendations."
+            )
+        else:
+            with st.spinner(
+                "🤖 AI is learning your preferences..."
+            ):
+                new_recommendations = new_user_recommendations(
+                    selected_books_with_ratings,
+                    top_n=5,
+                )
+
+            if user_name.strip():
+                st.success(
+                    f"Great, {user_name}! Here are your personalized recommendations."
+                )
+            else:
+                st.success(
+                    "Here are your personalized recommendations."
+                )
+
+            st.markdown(
+                '<div class="section-title">🎯 Recommended For You</div>',
+                unsafe_allow_html=True,
+            )
+
+            if new_recommendations:
+                st.markdown(
+                    """
+                    <div class="explanation">
+                        🧠 <b>How were these recommendations generated?</b><br>
+                        These books were recommended based on their content
+                        similarity to the books you selected and rated highly.
+                        This content-based approach is used for new users who
+                        do not yet have a learned neural-network user profile.
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                recommendation_df = pd.DataFrame(new_recommendations)
+
+                for rank, (_, row) in enumerate(
+                    recommendation_df.iterrows(),
+                    start=1,
+                ):
+                    title = str(row["Book-Title"])
+                    author = str(row["Book-Author"])
+                    publisher = str(row["Publisher"])
+                    score = float(row["Content Score"])
+
+                    st.markdown(
+                        f"""
+                        <div class="book-card">
+                            <div class="book-title">
+                                #{rank} 📚 {title}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    st.caption(f"{author} • {publisher}")
+                    st.metric(
+                        "Content Similarity Score",
+                        f"{score:.3f}",
                     )
 
             else:
-
                 st.warning(
-                    "We could not generate recommendations "
-                    "from the selected books."
+                    "We could not generate recommendations from the selected books."
                 )
 
 
@@ -2055,8 +1168,7 @@ with new_tab:
 # ============================================================
 
 st.markdown("---")
-
 st.caption(
     "AI-Based Intelligent Book Recommendation System "
-    "| Content-Based + Collaborative + Hybrid Recommendation"
+    "| Neural Network + Content-Based Cold Start"
 )
