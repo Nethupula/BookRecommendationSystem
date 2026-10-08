@@ -60,13 +60,20 @@ ENV/
 # ============================================================
 # Datasets (Large Data Files)
 # ============================================================
+# Ignore all raw data files and folders
 data/*
 !data/.gitkeep
 !data/processed/
+
+# Inside data/processed, ignore everything by default
 data/processed/*
 !data/processed/.gitkeep
 
-# Ignore common large raw dataset archives and formats
+# Allowed processed dataset files for the application
+!data/processed/books_clean.csv
+!data/processed/ratings_clean.csv
+
+# Ignore large raw dataset archives
 *.zip
 *.tar.gz
 *.tgz
@@ -76,22 +83,19 @@ data/processed/*
 *.feather
 
 # ============================================================
-# Model Artifacts & Weights (Exclude Large Binaries > 100MB)
+# Model Artifacts & Weights
 # ============================================================
+# Ignore all models by default (prevents committing >1GB matrix files)
 models/*
 !models/.gitkeep
 
-# Catch any standalone model binaries
-*.pkl
-*.pickle
-*.joblib
-*.keras
-*.h5
-*.hdf5
-*.pt
-*.pth
-*.onnx
-*.safetensors
+# Allowed model artifacts required for the application
+!models/tfidf_vectorizer.joblib
+!models/tfidf_matrix.joblib
+!models/content_model.joblib
+!models/neural_recommender.keras
+!models/user_to_index.joblib
+!models/book_to_index.joblib
 
 # ============================================================
 # Logs & Testing
