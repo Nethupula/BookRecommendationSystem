@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 import joblib
 import numpy as np
 import pandas as pd
@@ -13,371 +15,394 @@ from tensorflow.keras.layers import (
     Concatenate,
     Dense,
     Dropout,
-    Lambda
+    Rescaling
 )
+try:
+    from .pipeline_support import ROOT, require_files, load_content_books
+except ImportError:
+    from pipeline_support import ROOT, require_files, load_content_books
 
-# ============================================================
-# 1. CONFIGURATION
-# ============================================================
 
-RATINGS_PATH = "data/processed/ratings_clean.csv"
+def main():
+    require_files([ROOT / "data/processed/ratings_clean.csv"])
 
-MODEL_PATH = "models/neural_recommender.keras"
-USER_MAPPING_PATH = "models/user_to_index.joblib"
-BOOK_MAPPING_PATH = "models/book_to_index.joblib"
-HISTORY_PATH = "models/neural_training_history.joblib"
+    # ============================================================
+    # 1. CONFIGURATION
+    # ============================================================
 
-RANDOM_STATE = 42
+    RATINGS_PATH = str(ROOT / "data/processed/ratings_clean.csv")
 
-# ============================================================
-# 2. LOAD DATA
-# ============================================================
+    MODEL_PATH = str(ROOT / "models/neural_recommender.keras")
+    USER_MAPPING_PATH = str(ROOT / "models/user_to_index.joblib")
+    BOOK_MAPPING_PATH = str(ROOT / "models/book_to_index.joblib")
+    HISTORY_PATH = str(ROOT / "models/neural_training_history.joblib")
 
-print("=" * 70)
-print("NEURAL NETWORK BOOK RECOMMENDATION SYSTEM")
-print("=" * 70)
+    RANDOM_STATE = 42
+    tf.keras.utils.set_random_seed(RANDOM_STATE)
 
-ratings = pd.read_csv(RATINGS_PATH)
+    # ============================================================
+    # 2. LOAD DATA
+    # ============================================================
 
-print("\nOriginal dataset shape:", ratings.shape)
+    print("=" * 70)
+    print("NEURAL NETWORK BOOK RECOMMENDATION SYSTEM")
+    print("=" * 70)
 
-# Keep required columns
-ratings = ratings[
-    ["User-ID", "ISBN", "Book-Rating"]
-].copy()
+    ratings = pd.read_csv(RATINGS_PATH, dtype={"ISBN": str})
 
-# ============================================================
-# 3. CLEAN DATA
-# ============================================================
+    print("\nOriginal dataset shape:", ratings.shape)
 
-ratings = ratings.dropna()
+    # Keep required columns
+    ratings = ratings[
+        ["User-ID", "ISBN", "Book-Rating"]
+    ].copy()
 
-ratings["User-ID"] = ratings["User-ID"].astype(str)
-ratings["ISBN"] = ratings["ISBN"].astype(str)
+    # ============================================================
+    # 3. CLEAN DATA
+    # ============================================================
 
-ratings["Book-Rating"] = pd.to_numeric(
-    ratings["Book-Rating"],
-    errors="coerce"
-)
+    ratings = ratings.dropna()
 
-ratings = ratings.dropna()
+    ratings["User-ID"] = ratings["User-ID"].astype(str)
+    ratings["ISBN"] = ratings["ISBN"].astype(str)
 
-# Keep ratings within the valid 1–10 range
-ratings = ratings[
-    (ratings["Book-Rating"] >= 1) &
-    (ratings["Book-Rating"] <= 10)
-].copy()
+    ratings["Book-Rating"] = pd.to_numeric(
+        ratings["Book-Rating"],
+        errors="coerce"
+    )
 
-print("Clean dataset shape:", ratings.shape)
+    ratings = ratings.dropna()
 
-# ============================================================
-# 4. ENCODE USERS
-# ============================================================
+    # Keep ratings within the valid 1–10 range
+    ratings = ratings[
+        (ratings["Book-Rating"] >= 1) &
+        (ratings["Book-Rating"] <= 10)
+    ].copy()
 
-unique_users = ratings["User-ID"].unique()
+    print("Clean dataset shape:", ratings.shape)
 
-user_to_index = {
-    user_id: index
-    for index, user_id in enumerate(unique_users)
-}
+    # ============================================================
+    # 4. ENCODE USERS
+    # ============================================================
 
-ratings["user_index"] = ratings["User-ID"].map(
-    user_to_index
-)
+    unique_users = ratings["User-ID"].unique()
 
-# ============================================================
-# 5. ENCODE BOOKS
-# ============================================================
+    user_to_index = {
+        user_id: index
+        for index, user_id in enumerate(unique_users)
+    }
 
-unique_books = ratings["ISBN"].unique()
+    ratings["user_index"] = ratings["User-ID"].map(
+        user_to_index
+    )
 
-book_to_index = {
-    isbn: index
-    for index, isbn in enumerate(unique_books)
-}
+    # ============================================================
+    # 5. ENCODE BOOKS
+    # ============================================================
 
-ratings["book_index"] = ratings["ISBN"].map(
-    book_to_index
-)
+    unique_books = ratings["ISBN"].unique()
 
-num_users = len(unique_users)
-num_books = len(unique_books)
+    book_to_index = {
+        isbn: index
+        for index, isbn in enumerate(unique_books)
+    }
 
-print("\nDataset Information")
-print("-" * 70)
-print("Number of users:", num_users)
-print("Number of books:", num_books)
-print("Number of ratings:", len(ratings))
+    ratings["book_index"] = ratings["ISBN"].map(
+        book_to_index
+    )
 
-# ============================================================
-# 6. PREPARE INPUTS AND TARGET
-# ============================================================
+    num_users = len(unique_users)
+    num_books = len(unique_books)
 
-X = ratings[
-    ["user_index", "book_index"]
-].values
+    print("\nDataset Information")
+    print("-" * 70)
+    print("Number of users:", num_users)
+    print("Number of books:", num_books)
+    print("Number of ratings:", len(ratings))
 
-y = ratings[
-    "Book-Rating"
-].values.astype(np.float32)
+    # ============================================================
+    # 6. PREPARE INPUTS AND TARGET
+    # ============================================================
 
-# ============================================================
-# 7. TRAIN / VALIDATION / TEST SPLIT
-# ============================================================
+    X = ratings[
+        ["user_index", "book_index"]
+    ].values
 
-X_train, X_temp, y_train, y_temp = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    random_state=RANDOM_STATE
-)
+    y = ratings[
+        "Book-Rating"
+    ].values.astype(np.float32)
 
-X_val, X_test, y_val, y_test = train_test_split(
-    X_temp,
-    y_temp,
-    test_size=0.50,
-    random_state=RANDOM_STATE
-)
+    # ============================================================
+    # 7. TRAIN / VALIDATION / TEST SPLIT
+    # ============================================================
 
-print("\nDataset Split")
-print("-" * 70)
-print("Training samples:", len(X_train))
-print("Validation samples:", len(X_val))
-print("Test samples:", len(X_test))
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X,
+        y,
+        test_size=0.20,
+        random_state=RANDOM_STATE
+    )
 
-# ============================================================
-# 8. BUILD NEURAL NETWORK
-# ============================================================
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp,
+        y_temp,
+        test_size=0.50,
+        random_state=RANDOM_STATE
+    )
 
-print("\nBuilding neural network...")
+    print("\nDataset Split")
+    print("-" * 70)
+    print("Training samples:", len(X_train))
+    print("Validation samples:", len(X_val))
+    print("Test samples:", len(X_test))
 
-embedding_size = 32
+    # ============================================================
+    # 8. BUILD NEURAL NETWORK
+    # ============================================================
 
-# User input
-user_input = Input(
-    shape=(1,),
-    name="user_input"
-)
+    print("\nBuilding neural network...")
 
-# Book input
-book_input = Input(
-    shape=(1,),
-    name="book_input"
-)
+    embedding_size = 32
 
-# User embedding
-user_embedding = Embedding(
-    input_dim=num_users,
-    output_dim=embedding_size,
-    name="user_embedding"
-)(user_input)
+    # User input
+    user_input = Input(
+        shape=(1,),
+        name="user_input"
+    )
 
-# Book embedding
-book_embedding = Embedding(
-    input_dim=num_books,
-    output_dim=embedding_size,
-    name="book_embedding"
-)(book_input)
+    # Book input
+    book_input = Input(
+        shape=(1,),
+        name="book_input"
+    )
 
-# Flatten embeddings
-user_vector = Flatten(
-    name="user_vector"
-)(user_embedding)
+    # User embedding
+    user_embedding = Embedding(
+        input_dim=num_users,
+        output_dim=embedding_size,
+        name="user_embedding"
+    )(user_input)
 
-book_vector = Flatten(
-    name="book_vector"
-)(book_embedding)
+    # Book embedding
+    book_embedding = Embedding(
+        input_dim=num_books,
+        output_dim=embedding_size,
+        name="book_embedding"
+    )(book_input)
 
-# Combine user and book representations
-combined = Concatenate(
-    name="user_book_combination"
-)([
-    user_vector,
-    book_vector
-])
+    # Flatten embeddings
+    user_vector = Flatten(
+        name="user_vector"
+    )(user_embedding)
 
-# Dense layer 1
-x = Dense(
-    128,
-    activation="relu",
-    name="dense_128"
-)(combined)
+    book_vector = Flatten(
+        name="book_vector"
+    )(book_embedding)
 
-# Dropout
-x = Dropout(
-    0.2,
-    name="dropout"
-)(x)
+    # Combine user and book representations
+    combined = Concatenate(
+        name="user_book_combination"
+    )([
+        user_vector,
+        book_vector
+    ])
 
-# Dense layer 2
-x = Dense(
-    64,
-    activation="relu",
-    name="dense_64"
-)(x)
+    # Dense layer 1
+    x = Dense(
+        128,
+        activation="relu",
+        name="dense_128"
+    )(combined)
 
-# Sigmoid gives 0–1
-x = Dense(
-    1,
-    activation="sigmoid",
-    name="sigmoid_output"
-)(x)
+    # Dropout
+    x = Dropout(
+        0.2,
+        name="dropout"
+    )(x)
 
-# Convert 0–1 to 1–10
-output = Lambda(
-    lambda value: value * 9.0 + 1.0,
-    name="rating_scale"
-)(x)
+    # Dense layer 2
+    x = Dense(
+        64,
+        activation="relu",
+        name="dense_64"
+    )(x)
 
-# Create model
-model = Model(
-    inputs=[
-        user_input,
-        book_input
-    ],
-    outputs=output
-)
+    # Sigmoid gives 0–1
+    x = Dense(
+        1,
+        activation="sigmoid",
+        name="sigmoid_output"
+    )(x)
 
-# ============================================================
-# 9. COMPILE MODEL
-# ============================================================
+    # Convert 0–1 to 1–10
+    output = Rescaling(
+        scale=9.0, offset=1.0,
+        name="rating_scale"
+    )(x)
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=0.001
-    ),
-    loss="mse",
-    metrics=["mae"]
-)
-
-# ============================================================
-# 10. DISPLAY ARCHITECTURE
-# ============================================================
-
-print("\nNeural Network Architecture")
-print("=" * 70)
-
-model.summary()
-
-# ============================================================
-# 11. TRAIN MODEL
-# ============================================================
-
-print("\nStarting neural network training...")
-print("=" * 70)
-
-history = model.fit(
-    [
-        X_train[:, 0],
-        X_train[:, 1]
-    ],
-    y_train,
-
-    validation_data=(
-        [
-            X_val[:, 0],
-            X_val[:, 1]
+    # Create model
+    model = Model(
+        inputs=[
+            user_input,
+            book_input
         ],
-        y_val
-    ),
+        outputs=output
+    )
 
-    epochs=10,
-    batch_size=512,
+    # ============================================================
+    # 9. COMPILE MODEL
+    # ============================================================
 
-    verbose=1
-)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=0.001
+        ),
+        loss="mse",
+        metrics=["mae"]
+    )
 
-print("\nTraining completed successfully!")
+    # ============================================================
+    # 10. DISPLAY ARCHITECTURE
+    # ============================================================
 
-# ============================================================
-# 12. EVALUATE MODEL
-# ============================================================
+    print("\nNeural Network Architecture")
+    print("=" * 70)
 
-print("\nEvaluating model on test data...")
-print("=" * 70)
+    model.summary()
 
-test_loss, test_mae = model.evaluate(
-    [
-        X_test[:, 0],
-        X_test[:, 1]
-    ],
-    y_test,
-    verbose=1
-)
+    # ============================================================
+    # 11. TRAIN MODEL
+    # ============================================================
 
-test_rmse = np.sqrt(test_loss)
+    print("\nStarting neural network training...")
+    print("=" * 70)
 
-print("\nFinal Test Results")
-print("=" * 70)
-print(f"Test MSE : {test_loss:.4f}")
-print(f"Test RMSE: {test_rmse:.4f}")
-print(f"Test MAE : {test_mae:.4f}")
+    history = model.fit(
+        [
+            X_train[:, 0],
+            X_train[:, 1]
+        ],
+        y_train,
 
-# ============================================================
-# 13. CHECK PREDICTION RANGE
-# ============================================================
+        validation_data=(
+            [
+                X_val[:, 0],
+                X_val[:, 1]
+            ],
+            y_val
+        ),
 
-sample_predictions = model.predict(
-    [
-        X_test[:1000, 0],
-        X_test[:1000, 1]
-    ],
-    verbose=0
-).flatten()
+        epochs=10,
+        batch_size=512,
 
-print("\nPrediction Range Check")
-print("-" * 70)
-print(
-    f"Minimum prediction: "
-    f"{sample_predictions.min():.2f}"
-)
+        verbose=1
+    )
 
-print(
-    f"Maximum prediction: "
-    f"{sample_predictions.max():.2f}"
-)
+    print("\nTraining completed successfully!")
 
-# ============================================================
-# 14. SAVE MODEL
-# ============================================================
+    # ============================================================
+    # 12. EVALUATE MODEL
+    # ============================================================
 
-os.makedirs("models", exist_ok=True)
+    print("\nEvaluating model on test data...")
+    print("=" * 70)
 
-model.save(MODEL_PATH)
+    test_loss, test_mae = model.evaluate(
+        [
+            X_test[:, 0],
+            X_test[:, 1]
+        ],
+        y_test,
+        verbose=1
+    )
 
-# ============================================================
-# 15. SAVE MAPPINGS
-# ============================================================
+    test_rmse = np.sqrt(test_loss)
 
-joblib.dump(
-    user_to_index,
-    USER_MAPPING_PATH
-)
+    print("\nFinal Test Results")
+    print("=" * 70)
+    print(f"Test MSE : {test_loss:.4f}")
+    print(f"Test RMSE: {test_rmse:.4f}")
+    print(f"Test MAE : {test_mae:.4f}")
 
-joblib.dump(
-    book_to_index,
-    BOOK_MAPPING_PATH
-)
+    # ============================================================
+    # 13. CHECK PREDICTION RANGE
+    # ============================================================
 
-# ============================================================
-# 16. SAVE TRAINING HISTORY
-# ============================================================
+    sample_predictions = model.predict(
+        [
+            X_test[:1000, 0],
+            X_test[:1000, 1]
+        ],
+        verbose=0
+    ).flatten()
 
-joblib.dump(
-    history.history,
-    HISTORY_PATH
-)
+    print("\nPrediction Range Check")
+    print("-" * 70)
+    print(
+        f"Minimum prediction: "
+        f"{sample_predictions.min():.2f}"
+    )
 
-# ============================================================
-# 17. FINAL INFORMATION
-# ============================================================
+    print(
+        f"Maximum prediction: "
+        f"{sample_predictions.max():.2f}"
+    )
 
-print("\nSaved Files")
-print("=" * 70)
+    # ============================================================
+    # 14. SAVE MODEL
+    # ============================================================
 
-print(MODEL_PATH)
-print(USER_MAPPING_PATH)
-print(BOOK_MAPPING_PATH)
-print(HISTORY_PATH)
+    os.makedirs(ROOT / "models", exist_ok=True)
 
-print("\nNeural network training pipeline completed successfully!")
+    model.save(MODEL_PATH)
+
+    # ============================================================
+    # 15. SAVE MAPPINGS
+    # ============================================================
+
+    joblib.dump(
+        user_to_index,
+        USER_MAPPING_PATH
+    )
+
+    joblib.dump(
+        book_to_index,
+        BOOK_MAPPING_PATH
+    )
+
+    # ============================================================
+    # 16. SAVE TRAINING HISTORY
+    # ============================================================
+
+    joblib.dump(
+        history.history,
+        HISTORY_PATH
+    )
+
+    # Retain the exact split and input fingerprint for subsequent evaluation.
+    train_rows, temp_rows = train_test_split(np.arange(len(ratings)), test_size=.2, random_state=RANDOM_STATE)
+    val_rows, test_rows = train_test_split(temp_rows, test_size=.5, random_state=RANDOM_STATE)
+    np.savez(ROOT / "models/neural_split.npz", train=train_rows, validation=val_rows, test=test_rows)
+    (ROOT / "models/neural_manifest.json").write_text(json.dumps({
+        "ratings_sha256": hashlib.sha256((ROOT / "data/processed/ratings_clean.csv").read_bytes()).hexdigest(),
+        "seed": RANDOM_STATE,
+        "split_counts": {"train": len(train_rows), "validation": len(val_rows), "test": len(test_rows)},
+    }, indent=2))
+
+    # ============================================================
+    # 17. FINAL INFORMATION
+    # ============================================================
+
+    print("\nSaved Files")
+    print("=" * 70)
+
+    print(MODEL_PATH)
+    print(USER_MAPPING_PATH)
+    print(BOOK_MAPPING_PATH)
+    print(HISTORY_PATH)
+
+    print("\nNeural network training pipeline completed successfully!")
+
+
+if __name__ == "__main__":
+    main()

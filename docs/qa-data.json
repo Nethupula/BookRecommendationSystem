@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-08",
+  "books": 271360,
+  "ratings": 433671,
+  "users": 77805,
+  "matrix_shape": [
+    271360,
+    50000
+  ],
+  "duplicate_isbns": 0,
+  "duplicate_user_book_pairs": 0,
+  "ratings_missing_catalog_metadata": 49829,
+  "titles_with_suspect_encoding": 6634,
+  "matrix_rows_checked": 271360,
+  "matrix_max_row_error": 1.5681900222830336e-15,
+  "matrix_mismatched_rows": 0,
+  "cold_catalog_load_seconds": 3.516,
+  "search": {
+    "The Hobbit": {
+      "seconds": 0.0669,
+      "matches": 15
+    },
+    "Jane Austen": {
+      "seconds": 0.067,
+      "matches": 190
+    },
+    "Toni Morrison": {
+      "seconds": 0.0636,
+      "matches": 34
+    },
+    "zzzz_not_found": {
+      "seconds": 0.0969,
+      "matches": 0
+    },
+    "9780000000000": {
+      "seconds": 0.0265,
+      "matches": 0
+    },
+    "[": {
+      "seconds": 0.0001,
+      "matches": 0
+    }
+  },
+  "content_10_results_seconds": 0.175,
+  "content_results_returned": 10,
+  "model_artifact_sha256": {
+    "tfidf_matrix.joblib": "a7a43a9f1c222f21d2a5271c7c5c5d3a22047818a83e97a5377aa4e12eb79cb3",
+    "content_model.joblib": "917fe6be0941a4fc7d0e71a66ce5a561a30a08267e6872fd31a26d6b628f1e23",
+    "book_to_index.joblib": "06cf2926d13b60e85d8b590602841c1a7abaec329205b3a3ea1e4b3fb69378a9",
+    "neural_recommender.keras": "3a603c0beaa688461c1468b4fa1ce16e4fe6fcdedadffb81e93c60e719e46f8a",
+    "tfidf_vectorizer.joblib": "a6dcec5d285f1ab62e73eb166c70a93f23396d8b0c1ca566178d4349f68f1f08",
+    "user_to_index.joblib": "f05b8ae3e188b5d41e4ca0e07de0d1dde0b23a8e8057b4485a1f1ca210b1a4e4"
+  }
+}

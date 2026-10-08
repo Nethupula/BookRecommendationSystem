@@ -1,0 +1,64 @@
+<PROJECT>/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+/Users/ashenboy/.matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /var/folders/t7/b6jkc8bs1qg4j6rzzrbz4t5r0000gn/T/matplotlib-xy77bjok because there was an issue with the default path (/Users/ashenboy/.matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+Matplotlib is building the font cache; this may take a moment.
+test_five_book_limit_and_pagination (test_app.AppFlows) ... 2026-10-08 19:42:12.540 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+ok
+test_reader_invalid_valid_and_stale_results (test_app.AppFlows) ... 2026-10-08 19:42:19.183 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-10-08 19:42:20.658147: W external/local_xla/xla/tsl/platform/profile_utils/cpu_utils.cc:145] Failed to get CPU frequency: 0 Hz
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+W0000 00:00:1791468740.682533 5422530 op_level_cost_estimator.cc:743] Invalid device specifications for CPU: type: "CPU" model: "0" num_cores: 8 environment { key: "cpu_instruction_set" value: "ARM NEON" } environment { key: "eigen" value: "3.4.90" } l1_cache_size: 16384 l2_cache_size: 524288 l3_cache_size: 524288 memory_size: 268435456
+ok
+test_selection_survives_search_empty_queries_paging_and_navigation (test_app.AppFlows) ... 2026-10-08 19:42:22.161 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+ok
+test_validation_results_persist_save_export_and_remove (test_app.AppFlows) ... 2026-10-08 19:42:23.676 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+ok
+test_z_catalog_failure_is_actionable (test_app.AppFlows) ... 2026-10-08 19:42:25.985 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+ERROR:root:Catalog startup failed
+Traceback (most recent call last):
+  File "<PROJECT>/app.py", line 146, in <module>
+    library = catalog()
+  File "<PROJECT>/.venv/lib/python3.9/site-packages/streamlit/runtime/caching/cache_utils.py", line 227, in __call__
+    return self._get_or_create_cached_value(args, kwargs, spinner_message)
+  File "<PROJECT>/.venv/lib/python3.9/site-packages/streamlit/runtime/caching/cache_utils.py", line 269, in _get_or_create_cached_value
+    return self._handle_cache_miss(cache, value_key, func_args, func_kwargs)
+  File "<PROJECT>/.venv/lib/python3.9/site-packages/streamlit/runtime/caching/cache_utils.py", line 328, in _handle_cache_miss
+    computed_value = self._info.func(*func_args, **func_kwargs)
+  File "<PROJECT>/app.py", line 19, in catalog
+    return load_catalog()
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1093, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1097, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1152, in _execute_mock_call
+    raise effect
+src.recommender.CatalogError: Missing files: data/processed/books_clean.csv
+ok
+test_preserves_every_learned_weight_and_rating_scale (test_model_loader.LoaderTests) ... ok
+test_temporary_neural_training_evaluation_and_plotting (test_pipelines.NeuralPipelineTests) ... W0000 00:00:1791468747.166119 5421416 op_level_cost_estimator.cc:743] Invalid device specifications for CPU: type: "CPU" model: "0" num_cores: 8 environment { key: "cpu_instruction_set" value: "ARM NEON" } environment { key: "eigen" value: "3.4.90" } l1_cache_size: 16384 l2_cache_size: 524288 l3_cache_size: 524288 memory_size: 268435456
+ok
+test_imports_do_not_train_load_artifacts_or_write_data (test_pipelines.PipelineTests) ... ok
+test_missing_prerequisites_have_actionable_errors (test_pipelines.PipelineTests) ... ok
+test_neighbor_ties_exclude_actual_self (test_pipelines.PipelineTests) ... ok
+test_sparse_matrix_preserves_only_known_ratings (test_pipelines.PipelineTests) ... ok
+test_synthetic_preprocess_content_collaborative_and_evaluation (test_pipelines.PipelineTests) ... ok
+test_excludes_seed_editions_and_supplements_but_keeps_other_authors (test_recommender.RankingTests) ... ok
+test_invalid_preferences_and_counts (test_recommender.RankingTests) ... ok
+test_low_ratings_are_not_positive_preferences (test_recommender.RankingTests) ... ok
+test_matrix_validation (test_recommender.RankingTests) ... ok
+test_reader_excludes_known_work_and_missing_metadata (test_recommender.RankingTests) ... ok
+test_reader_rejects_invalid_outputs_and_users (test_recommender.RankingTests) ... ok
+test_scores_are_bounded_and_finite (test_recommender.RankingTests) ... ok
+test_search_is_literal_and_keeps_distinct_authors (test_recommender.RankingTests) ... ok
+test_zero_vectors_are_safe (test_recommender.RankingTests) ... ok
+test_files_are_validated_and_utf8_is_preserved (test_recommender.TextAndDataTests) ... ok
+test_known_hobbit_aliases (test_recommender.TextAndDataTests) ... ok
+test_manifest_detects_catalog_replacement (test_recommender.TextAndDataTests) ... ok
+test_markup_is_text_and_filter_is_specific (test_recommender.TextAndDataTests) ... ok
+test_unicode_and_edition_identity (test_recommender.TextAndDataTests) ... ok
+
+----------------------------------------------------------------------
+Ran 26 tests in 18.944s
+
+OK

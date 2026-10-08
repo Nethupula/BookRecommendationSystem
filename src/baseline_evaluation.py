@@ -1,269 +1,71 @@
+"""Compare a supplied neural model with the mean-rating baseline.
+
+Without the saved original split, the seeded split below is a reproducibility
+check of the repository's recipe, not independently verified held-out evidence.
+"""
+import joblib
+import hashlib
+import json
 import numpy as np
 import pandas as pd
-import joblib
-import tensorflow as tf
-
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-
-# ============================================================
-# 1. LOAD DATA
-# ============================================================
-
-RATINGS_PATH = "data/processed/ratings_clean.csv"
-MODEL_PATH = "models/neural_recommender.keras"
-
-ratings = pd.read_csv(
-    RATINGS_PATH,
-    encoding="latin-1"
-)
-
-ratings = ratings[
-    ["User-ID", "ISBN", "Book-Rating"]
-].dropna()
-
-ratings["User-ID"] = ratings["User-ID"].astype(str)
-ratings["ISBN"] = ratings["ISBN"].astype(str)
-ratings["Book-Rating"] = pd.to_numeric(
-    ratings["Book-Rating"],
-    errors="coerce"
-)
-
-ratings = ratings.dropna()
-
-ratings = ratings[
-    (ratings["Book-Rating"] >= 1) &
-    (ratings["Book-Rating"] <= 10)
-].copy()
-
-
-# ============================================================
-# 2. CREATE SAME USER/BOOK ENCODING
-# ============================================================
-
-unique_users = ratings["User-ID"].unique()
-unique_books = ratings["ISBN"].unique()
-
-user_to_index = {
-    user_id: index
-    for index, user_id in enumerate(unique_users)
-}
-
-book_to_index = {
-    isbn: index
-    for index, isbn in enumerate(unique_books)
-}
-
-ratings["user_index"] = ratings["User-ID"].map(
-    user_to_index
-)
-
-ratings["book_index"] = ratings["ISBN"].map(
-    book_to_index
-)
-
-
-# ============================================================
-# 3. PREPARE DATA
-# ============================================================
-
-X = ratings[
-    ["user_index", "book_index"]
-].values
-
-y = ratings[
-    "Book-Rating"
-].values.astype(np.float32)
-
-
-# ============================================================
-# 4. SAME TRAIN / VALIDATION / TEST SPLIT
-# ============================================================
-
-X_train, X_temp, y_train, y_temp = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    random_state=42
-)
-
-X_val, X_test, y_val, y_test = train_test_split(
-    X_temp,
-    y_temp,
-    test_size=0.50,
-    random_state=42
-)
-
-
-# ============================================================
-# 5. BASELINE MODEL
-# ============================================================
-
-baseline_prediction = np.mean(y_train)
-
-baseline_predictions = np.full(
-    len(y_test),
-    baseline_prediction
-)
-
-baseline_mae = mean_absolute_error(
-    y_test,
-    baseline_predictions
-)
-
-baseline_rmse = np.sqrt(
-    mean_squared_error(
-        y_test,
-        baseline_predictions
-    )
-)
-
-
-# ============================================================
-# 6. LOAD TRAINED NEURAL NETWORK
-# ============================================================
-
-print("Loading trained neural network...")
-
-model = tf.keras.models.load_model(
-    MODEL_PATH,
-    safe_mode=False
-)
-
-
-# ============================================================
-# 7. NEURAL NETWORK PREDICTIONS
-# ============================================================
-
-neural_predictions = model.predict(
-    [
-        X_test[:, 0],
-        X_test[:, 1]
-    ],
-    batch_size=1024,
-    verbose=0
-).flatten()
-
-neural_predictions = np.clip(
-    neural_predictions,
-    1.0,
-    10.0
-)
-
-
-# ============================================================
-# 8. NEURAL NETWORK METRICS
-# ============================================================
-
-neural_mae = mean_absolute_error(
-    y_test,
-    neural_predictions
-)
-
-neural_rmse = np.sqrt(
-    mean_squared_error(
-        y_test,
-        neural_predictions
-    )
-)
-
-
-# ============================================================
-# 9. CALCULATE IMPROVEMENT
-# ============================================================
-
-mae_improvement = (
-    (baseline_mae - neural_mae)
-    / baseline_mae
-) * 100
-
-rmse_improvement = (
-    (baseline_rmse - neural_rmse)
-    / baseline_rmse
-) * 100
-
-
-# ============================================================
-# 10. DISPLAY RESULTS
-# ============================================================
-
-print("\n")
-print("=" * 70)
-print("BASELINE VS NEURAL NETWORK")
-print("=" * 70)
-
-print(
-    f"\nAverage-rating baseline prediction: "
-    f"{baseline_prediction:.4f}"
-)
-
-print("\nPerformance Results")
-print("-" * 70)
-
-print(
-    f"Baseline MAE : {baseline_mae:.4f}"
-)
-
-print(
-    f"Baseline RMSE: {baseline_rmse:.4f}"
-)
-
-print(
-    f"Neural Network MAE : {neural_mae:.4f}"
-)
-
-print(
-    f"Neural Network RMSE: {neural_rmse:.4f}"
-)
-
-print("\nImprovement")
-print("-" * 70)
-
-print(
-    f"MAE improvement : {mae_improvement:.2f}%"
-)
-
-print(
-    f"RMSE improvement: {rmse_improvement:.2f}%"
-)
-
-print("\n")
-print("=" * 70)
-print("Evaluation completed successfully.")
-print("=" * 70)
-
-
-# ============================================================
-# 11. SAVE RESULTS
-# ============================================================
-
-results = pd.DataFrame({
-    "Model": [
-        "Average Rating Baseline",
-        "Neural Network"
-    ],
-
-    "MAE": [
-        baseline_mae,
-        neural_mae
-    ],
-
-    "RMSE": [
-        baseline_rmse,
-        neural_rmse
-    ]
-})
-
-results.to_csv(
-    "data/neural_network_evaluation.csv",
-    index=False
-)
-
-print(
-    "\nResults saved to:"
-)
-
-print(
-    "data/neural_network_evaluation.csv"
-)
+try:
+    from .recommender import ROOT, read_processed
+    from .model_loader import load_recommender
+    from .pipeline_support import require_files
+except ImportError:
+    from recommender import ROOT, read_processed
+    from model_loader import load_recommender
+    from pipeline_support import require_files
+
+
+def main():
+    paths=[ROOT/'data/processed/ratings_clean.csv',ROOT/'models/neural_recommender.keras',
+           ROOT/'models/user_to_index.joblib',ROOT/'models/book_to_index.joblib']
+    require_files(paths)
+    ratings=read_processed(paths[0])
+    ratings['Book-Rating']=pd.to_numeric(ratings['Book-Rating'],errors='coerce')
+    ratings=ratings[ratings['Book-Rating'].between(1,10)].copy()
+    users={str(k):int(v) for k,v in joblib.load(paths[2]).items()}
+    books={str(k):int(v) for k,v in joblib.load(paths[3]).items()}
+    # Saved mappings define embedding identity. CSV row order must not redefine it.
+    ratings['user_index']=ratings['User-ID'].astype(str).map(users)
+    ratings['book_index']=ratings.ISBN.map(books)
+    if ratings[['user_index','book_index']].isna().any().any():
+        raise SystemExit('The dataset contains IDs absent from the trained mappings; evaluate against the original training data.')
+    x=ratings[['user_index','book_index']].to_numpy(dtype=np.int32)
+    y=ratings['Book-Rating'].to_numpy(dtype=np.float32)
+    if len(y)<10:
+        raise SystemExit('At least 10 valid ratings are needed for this split.')
+    manifest=ROOT/'models/neural_manifest.json'
+    split=ROOT/'models/neural_split.npz'
+    verified_split=manifest.is_file() and split.is_file()
+    if verified_split:
+        expected=json.loads(manifest.read_text())['ratings_sha256']
+        if hashlib.sha256(paths[0].read_bytes()).hexdigest()!=expected:
+            raise SystemExit('The ratings file changed after training; restore the original dataset or retrain.')
+        with np.load(split) as indices:
+            y_train=y[indices['train']]
+            x_test=x[indices['test']]
+            y_test=y[indices['test']]
+    else:
+        x_train,x_temp,y_train,y_temp=train_test_split(x,y,test_size=.2,random_state=42)
+        _,x_test,_,y_test=train_test_split(x_temp,y_temp,test_size=.5,random_state=42)
+    model=load_recommender(paths[1])
+    predictions=np.asarray(model.predict([x_test[:,0:1],x_test[:,1:2]],batch_size=1024,verbose=0)).ravel()
+    if not np.isfinite(predictions).all():
+        raise SystemExit('Model predictions contain nonfinite values.')
+    rows=[]
+    for name,pred in [('Average rating baseline',np.full(len(y_test),y_train.mean())),('Neural model',predictions)]:
+        rows.append({'Model':name,'MAE':mean_absolute_error(y_test,pred),'RMSE':np.sqrt(mean_squared_error(y_test,pred))})
+    result=pd.DataFrame(rows)
+    if not verified_split:
+        print('CAUTION: the original training split and artifact provenance are unavailable; this seeded reconstruction cannot certify held-out quality.')
+    print(result.to_string(index=False))
+    result.to_csv(ROOT/'data/neural_network_evaluation.csv',index=False)
+
+
+if __name__=='__main__':
+    main()
