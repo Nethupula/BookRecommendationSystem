@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 import joblib
 import tensorflow as tf
+from src.model_loader import load_recommender
 
 
 # ============================================================
@@ -159,10 +160,7 @@ def load_content_model():
 @st.cache_resource
 
 def load_neural_network():
-    model = tf.keras.models.load_model(
-        "models/neural_recommender.keras",
-        safe_mode=False,
-    )
+    model = load_recommender("models/neural_recommender.keras")
 
     raw_user_to_index = joblib.load("models/user_to_index.joblib")
     raw_book_to_index = joblib.load("models/book_to_index.joblib")
